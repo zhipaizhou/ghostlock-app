@@ -395,8 +395,10 @@ namespace ghostlock::session::backend {
                            "selinux_state); relying on init_cred domain swap\n");
                 attack::timer_mark("Write 1 skipped");
                 support::run_state::complete("w1a");
-                support::run_state::enter("w1b");
-                if (!w1_scratch_repair<M>(session)) return StageResult::Failed;
+                /* W1b repairs the multicast private scratch page poisoned by a W1
+                 * write; with W1 skipped there is nothing to repair and the
+                 * quarantine call itself fails (no sockets to reclaim), so skip
+                 * W1b as well. */
                 support::run_state::complete("w1b");
                 return StageResult::Continue;
             }
