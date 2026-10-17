@@ -99,15 +99,19 @@ namespace {
         return ok;
     }
 
-    bool test_selinux_retry_then_w2() {
+    bool test_selinux_skip_then_w2() {
         reset_script();
-        script().verify_selinux = {0, 1};
+        /* MTK 5.10 (OnePlus Ace 2V): the W1 8-byte zero write corrupts
+         * selinux_state fields and the policy pointer, so W1 is skipped and
+         * W2's DirtyCred swap to init_cred (init LSM domain) carries the run. */
         const auto result = run_once();
         bool ok = true;
         ok &= expect(result.code == ghostlock::runtime::RunCode::Completed,
-                     "selinux: pipeline completes");
-        ok &= expect(count_calls("verify_selinux") == 2,
-                     "selinux: verify_selinux retried twice");
+                     "selinux: pipeline completes without W1");
+        ok &= expect(count_calls("verify_selinux") == 0,
+                     "selinux: W1 skipped, no verify_selinux call");
+        ok &= expect(count_calls("verify_w2") >= 1,
+                     "selinux: W2 verified after W1 skip");
         return ok;
     }
 } // namespace
@@ -117,7 +121,7 @@ int main() {
     ok &= test_happy_path();
     ok &= test_w2_retry_until_success();
     ok &= test_w2_exhausts_attempts();
-    ok &= test_selinux_retry_then_w2();
+    ok &= test_selinux_skip_then_w2();
     if (ok) {
         std::puts("backend_dataflow_test: ok");
         return 0;
