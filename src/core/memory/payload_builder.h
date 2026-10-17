@@ -17,17 +17,24 @@ namespace ghostlock::memory {
         Disabled = 0,
         Zero = 1,
         Credential = 2,
+        Value = 3,   /* *(target) := value (arbitrary 8-byte kernel value) */
     };
 
     struct WriteRequest final {
         std::uintptr_t target = 0;
         WriteMode mode = WriteMode::Disabled;
         bool preserve_child = false;
+        std::uintptr_t value = 0;   /* Value mode: the 8-byte value written to target */
 
         [[nodiscard]] static constexpr WriteRequest make(std::uintptr_t target,
                                                          WriteMode mode,
                                                          bool leaf) noexcept {
-            return WriteRequest{target, mode, !leaf};
+            return WriteRequest{target, mode, !leaf, 0};
+        }
+        /* Value write: leaf layout {pc=value, right=0, left=target}. */
+        [[nodiscard]] static constexpr WriteRequest make_value(std::uintptr_t target,
+                                                               std::uintptr_t value) noexcept {
+            return WriteRequest{target, WriteMode::Value, true, value};
         }
     };
 
