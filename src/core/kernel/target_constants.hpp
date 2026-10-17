@@ -16,9 +16,9 @@ namespace ghostlock::target {
         inline constexpr std::uintptr_t kKernelSnitchIdentityStart =
                 0xffffff8000000000ULL;
         inline constexpr std::uintptr_t kKernelSnitchIdentityEnd =
-                0xffffff8c00000000ULL;
+                0xffffffb800000000ULL;
         inline constexpr std::uintptr_t kDirectMapBase = 0xffffff8000000000ULL;
-        inline constexpr std::uintptr_t kDirectMapEnd = 0xffffff9000000000ULL;
+        inline constexpr std::uintptr_t kDirectMapEnd = 0xffffffc000000000ULL;
         inline constexpr std::uintptr_t kVmemmapStart = 0xfffffffe00000000ULL;
     } // namespace address
 
