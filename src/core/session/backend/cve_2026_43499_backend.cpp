@@ -211,6 +211,15 @@ namespace ghostlock::session::backend {
              * Lower stages return false (exploit reported failed) after
              * printing STAGE{n}_OK. */
             int32_t stage = 5;
+            /* Stage can come from /sdcard/Download/gl_stage (1..5); the
+             * GL_STAGE env var overrides it. This lets adb switch stages
+             * without a rebuild. */
+            FILE *sf = fopen("/sdcard/Download/gl_stage", "r");
+            if (sf) {
+                int32_t v = 0;
+                if (fscanf(sf, "%d", &v) == 1 && v > 0) stage = v;
+                fclose(sf);
+            }
             const char *se = getenv("GL_STAGE");
             if (se && *se && atoi(se) > 0) stage = atoi(se);
             if (stage > 5) stage = 5;
