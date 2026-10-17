@@ -62,6 +62,13 @@ namespace ghostlock::memory {
         };
         if (!request || request->mode == WriteMode::Disabled) return layout;
 
+        if (request->mode == WriteMode::Value) {
+            /* Arbitrary 8-byte value write: {pc=value, right=0, left=target}. */
+            layout.parent = request->target - 8;
+            layout.right = request->value;
+            return layout;
+        }
+
         if (request->preserve_child) {
             layout.right = request->mode == WriteMode::Credential
                                ? init_cred_alias
