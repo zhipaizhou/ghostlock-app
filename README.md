@@ -1,5 +1,13 @@
 # GhostLock-App
 
+> **⚠️ Development Status & Disclaimer**
+>
+> - **Work in Progress**: This project is under active development; features and docs may change without notice. No stability or usability guarantee is provided.
+> - **For Research Only**: Intended solely for learning and research on kernel security mechanisms. Do NOT use it for any illegal or unauthorized purpose. Users assume all legal and security responsibility; the author and maintainers assume no liability.
+> - **Upstream Attribution**: Derived (fork) from [YuKongA/ghostlock-app](https://github.com/YuKongA/ghostlock-app), licensed under Apache License 2.0 (see [LICENSE](LICENSE)); copyright belongs to the original authors.
+> - **AI Assistance**: Documentation in this repository is organized with assistance from Doubao (豆包) AI.
+> - **Not Affiliated**: This project is not affiliated with Doubao or ByteDance, and is not an official product of either.
+
 > 中文: [README_ZH.md](README_ZH.md)
 
 ## Documentation
