@@ -1,5 +1,13 @@
 # GhostLock-App
 
+> **⚠️ 开发状态与免责声明**
+>
+> - **开发未完成（WIP）**：本项目处于开发阶段，功能与文档随时可能变更，不保证稳定性与可用性，请勿用于生产环境。
+> - **仅供学习研究**：本项目仅用于内核安全机制的学习与研究，严禁用于任何非法或未授权的用途。使用者须自行承担全部法律与安全责任，作者与维护者不承担任何责任。
+> - **上游归属**：本项目为 [YuKongA/ghostlock-app](https://github.com/YuKongA/ghostlock-app) 的衍生（Fork），沿用 Apache-2.0 许可证（见 [LICENSE](LICENSE)），版权归原作者所有。
+> - **AI 辅助声明**：本仓库文档整理由豆包（Doubao）AI 辅助完成。
+> - **非官方声明**：本项目与豆包（Doubao）、字节跳动（ByteDance）无任何关联，亦非其官方产品。
+
 > English: [README.md](README.md)
 
 ## 文档
